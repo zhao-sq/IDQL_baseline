@@ -14,7 +14,7 @@ flags.DEFINE_integer('variant', 0, 'Logging interval.')
 def main(_):
     constant_parameters = dict(project='final_finetune_2',
                                experiment_name='finetune_iql',
-                               max_steps=3000001,
+                               max_steps=3000001, #3000001,
                                batch_size=512, #Actor batch size, critic is fixed to 256
                                eval_episodes=50,
                                log_interval=1000,
@@ -35,7 +35,7 @@ def main(_):
                                 clip_sampler = True,
                                 M = 0,),
                                rl_config=dict(
-                                   model_cls='DDPMIQLLearner',
+                                   model_cls='DDPMIQLLearner', #'DDPMIQLLearner',
                                    actor_lr=3e-4,
                                    critic_lr=3e-4,
                                    value_lr=3e-4,
@@ -43,13 +43,14 @@ def main(_):
                                    N=64,
                                    M=0,
                                    actor_dropout_rate=0.1, 
-                                   actor_num_blocks=3,
+                                   actor_num_blocks=6,
                                    actor_weight_decay=None,
                                    actor_tau=0.001,
-                                   actor_architecture='ln_resnet',
+                                #    actor_architecture="ln_resnet", #'ln_resnet',
+                                   actor_architecture="Q_former", #'ln_resnet',
                                    critic_objective='expectile',
                                    beta_schedule='vp',
-                                   actor_objective='bc',
+                                   actor_objective='soft_adv',
                                    decay_steps=int(2e6), #Change this to int(4e6) for (2) (because you are finetuning actor)
                                    actor_layer_norm=True,
                                ))
@@ -90,6 +91,13 @@ def main(_):
 
     print(len(filtered_variants))
     variant = filtered_variants[FLAGS.variant]
+    variant['task'] = 'pick_and_lift'
+    # variant['task'] = 'put_groceries_in_cupboard'
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ckpt_dir = os.path.join('/media/msc-auto/HDD/szhao/LeveFD/idql_ckp', timestamp)
+    os.mkdir(ckpt_dir)
+    variant["ckpt_dir"] = ckpt_dir
     print(FLAGS.variant)
     call_main(variant)
 

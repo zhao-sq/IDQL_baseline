@@ -128,6 +128,11 @@ class Dataset(object):
         self.rng, sample = self._sample_jax(self.rng)
         return sample
 
+    def sample_jax_batch(self, batch_size: int, keys: Optional[Iterable[str]] = None):
+        """Sample one CPU batch, then move only that batch to the JAX device."""
+        batch = self.sample(batch_size, keys=keys)
+        return jax.device_put(batch)
+
     def split(self, ratio: float) -> Tuple["Dataset", "Dataset"]:
         assert 0 < ratio and ratio < 1
         train_index = np.index_exp[: int(self.dataset_len * ratio)]

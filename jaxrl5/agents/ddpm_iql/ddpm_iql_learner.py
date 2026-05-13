@@ -11,7 +11,7 @@ from flax import struct
 import numpy as np
 from jaxrl5.agents.agent import Agent
 from jaxrl5.data.dataset import DatasetDict
-from jaxrl5.networks import MLP, Ensemble, StateActionValue, StateValue, DDPM, FourierFeatures, cosine_beta_schedule, ddpm_sampler, MLPResNet, get_weight_decay_mask, vp_beta_schedule
+from jaxrl5.networks import MLP, Ensemble, StateActionValue, StateValue, DDPM, FourierFeatures, cosine_beta_schedule, ddpm_sampler, MLPResNet, get_weight_decay_mask, vp_beta_schedule, QFormerDDPM, QFormerStateActionValue, QFormerStateValue, QFormerUNetBase
 
 def expectile_loss(diff, expectile=0.8):
     weight = jnp.where(diff > 0, expectile, (1 - expectile))
@@ -80,11 +80,13 @@ class DDPMIQLLearner(Agent):
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Box,
         actor_architecture: str = 'mlp',
+        critic_architecture: Optional[str] = None,
+        value_architecture: Optional[str] = None,
         actor_lr: Union[float, optax.Schedule] = 3e-4,
         critic_lr: float = 3e-4,
         value_lr: float = 3e-4,
         critic_hidden_dims: Sequence[int] = (256, 256),
-        actor_hidden_dims: Sequence[int] = (256, 256, 256),
+        actor_hidden_dims: Sequence[int] = (512, 512, 512), #(256, 256, 256),
         discount: float = 0.99,
         tau: float = 0.005,
         critic_hyperparam: float = 0.7,
@@ -105,6 +107,17 @@ class DDPMIQLLearner(Agent):
         critic_objective: str = 'expectile',
         beta_schedule: str = 'vp',
         decay_steps: Optional[int] = int(2e6),
+        q_former_pooled_dim: int = 64,
+        q_former_num_layers: int = 4,
+        q_former_num_heads: int = 8,
+        q_former_ff_dim: int = 512,
+        q_former_dropout: float = 0.1,
+        q_former_mask_type: str = 'none',
+        q_former_down_dims: Sequence[int] = (128, 256, 512),
+        q_former_kernel_size: int = 5,
+        q_former_n_groups: int = 8,
+        q_former_num_objects: int = 1,
+        q_former_num_containers: int = 1,
     ):
 
         rng = jax.random.PRNGKey(seed)
@@ -112,6 +125,11 @@ class DDPMIQLLearner(Agent):
         actions = action_space.sample()
         observations = observation_space.sample()
         action_dim = action_space.shape[0]
+        actor_uses_q_former = actor_architecture == 'Q_former'
+        if critic_architecture is None:
+            critic_architecture = 'Q_former' if actor_uses_q_former else 'mlp'
+        if value_architecture is None:
+            value_architecture = critic_architecture
 
         preprocess_time_cls = partial(FourierFeatures,
                                       output_size=time_dim,
@@ -148,16 +166,36 @@ class DDPMIQLLearner(Agent):
             actor_def = DDPM(time_preprocess_cls=preprocess_time_cls,
                              cond_encoder_cls=cond_model_cls,
                              reverse_encoder_cls=base_model_cls)
-
+        elif actor_architecture == 'Q_former':
+            base_model_cls = partial(QFormerUNetBase,
+                                     action_dim=action_dim,
+                                     token_dim=observations.shape[-1],
+                                     pooled_dim=q_former_pooled_dim,
+                                     num_objects=q_former_num_objects,
+                                     num_containers=q_former_num_containers,
+                                     fusion_num_layers=q_former_num_layers,
+                                     fusion_num_heads=q_former_num_heads,
+                                     fusion_ff_dim=q_former_ff_dim,
+                                     fusion_dropout=q_former_dropout,
+                                     fusion_mask_type=q_former_mask_type,
+                                     down_dims=q_former_down_dims,
+                                     kernel_size=q_former_kernel_size,
+                                     n_groups=q_former_n_groups)
+            actor_def = QFormerDDPM(time_preprocess_cls=preprocess_time_cls,
+                                    cond_encoder_cls=cond_model_cls,
+                                    reverse_encoder_cls=base_model_cls)
         else:
             raise ValueError(f'Invalid actor architecture: {actor_architecture}')
         
+        def count_params(params):
+            return sum(x.size for x in jax.tree_util.tree_leaves(params))
         time = jnp.zeros((1, 1))
         observations = jnp.expand_dims(observations, axis = 0)
         actions = jnp.expand_dims(actions, axis = 0)
         actor_params = actor_def.init(actor_key, observations, actions,
                                         time)['params']
-
+        actor_param_count = count_params(actor_params)
+        print(f"[Model Size] Actor params: {actor_param_count:,}")
         score_model = TrainState.create(apply_fn=actor_def.apply,
                                         params=actor_params,
                                         tx=optax.adamw(learning_rate=actor_lr))
@@ -168,9 +206,26 @@ class DDPMIQLLearner(Agent):
                                                     lambda _: None, lambda _: None))
 
         critic_base_cls = partial(MLP, hidden_dims=critic_hidden_dims, activate_final=True)
-        critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
+        if critic_architecture == 'mlp':
+            critic_cls = partial(StateActionValue, base_cls=critic_base_cls)
+        elif critic_architecture == 'Q_former':
+            critic_cls = partial(QFormerStateActionValue,
+                                 base_cls=critic_base_cls,
+                                 token_dim=observations.shape[-1],
+                                 pooled_dim=q_former_pooled_dim,
+                                 num_objects=q_former_num_objects,
+                                 num_containers=q_former_num_containers,
+                                 fusion_num_layers=q_former_num_layers,
+                                 fusion_num_heads=q_former_num_heads,
+                                 fusion_ff_dim=q_former_ff_dim,
+                                 fusion_dropout=q_former_dropout,
+                                 fusion_mask_type=q_former_mask_type)
+        else:
+            raise ValueError(f'Invalid critic architecture: {critic_architecture}')
         critic_def = Ensemble(critic_cls, num=num_qs)
         critic_params = critic_def.init(critic_key, observations, actions)["params"]
+        critic_param_count = count_params(critic_params)
+        print(f"[Model Size] Critic Q params: {critic_param_count:,}")
         critic_optimiser = optax.adam(learning_rate=critic_lr)
         critic = TrainState.create(
             apply_fn=critic_def.apply, params=critic_params, tx=critic_optimiser
@@ -181,7 +236,21 @@ class DDPMIQLLearner(Agent):
             tx=optax.GradientTransformation(lambda _: None, lambda _: None),
         )
 
-        value_def = StateValue(base_cls=critic_base_cls)
+        if value_architecture == 'mlp':
+            value_def = StateValue(base_cls=critic_base_cls)
+        elif value_architecture == 'Q_former':
+            value_def = QFormerStateValue(base_cls=critic_base_cls,
+                                          token_dim=observations.shape[-1],
+                                          pooled_dim=q_former_pooled_dim,
+                                          num_objects=q_former_num_objects,
+                                          num_containers=q_former_num_containers,
+                                          fusion_num_layers=q_former_num_layers,
+                                          fusion_num_heads=q_former_num_heads,
+                                          fusion_ff_dim=q_former_ff_dim,
+                                          fusion_dropout=q_former_dropout,
+                                          fusion_mask_type=q_former_mask_type)
+        else:
+            raise ValueError(f'Invalid value architecture: {value_architecture}')
         value_params = value_def.init(value_key, observations)["params"]
         value_optimiser = optax.adam(learning_rate=value_lr)
 
