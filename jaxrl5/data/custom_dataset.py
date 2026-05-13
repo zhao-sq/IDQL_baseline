@@ -58,8 +58,9 @@ class CustomDataset(Dataset):
         # else:
         #     include_contrastive = False
         img_task = False
-        # dinofea_path = '/home/msc-auto/szhao/IDQL/dinov3_' + task + '_global_features.npy' 
-        dinofea_path = '/home/msc-auto/szhao/IDQL/dinov2_' + task + '_patch_tokens.npy' 
+        # dinofea_path = '/home/msc-auto/szhao/IDQL/dinov3_' + task + '_global_features.npy'
+        dinofea_path = '/home/msc-auto/szhao/LeveFD/dinov3_' + task + '_global_features.npy' 
+        # dinofea_path = '/home/msc-auto/szhao/IDQL/dinov2_' + task + '_patch_tokens.npy' 
         root_data = self.define_action_type(root_data_original, dinofea_path, img_task=img_task)
         post_process_data = self.post_process(root_data, img_task=img_task)
 
