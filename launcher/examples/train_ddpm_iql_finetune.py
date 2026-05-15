@@ -14,11 +14,11 @@ flags.DEFINE_integer('variant', 0, 'Logging interval.')
 def main(_):
     constant_parameters = dict(project='final_finetune_2',
                                experiment_name='finetune_iql',
-                               max_steps=3000001, #3000001,
+                               max_steps=5000001, #3000001,
                                batch_size=512, #Actor batch size, critic is fixed to 256
                                eval_episodes=50,
                                log_interval=1000,
-                               eval_interval=1000000,
+                               eval_interval=50000,
                                save_video = False,
                                filter_threshold=None,
                                take_top=None,
@@ -43,15 +43,20 @@ def main(_):
                                    N=64,
                                    M=0,
                                    actor_dropout_rate=0.1, 
-                                   actor_num_blocks=6,
+                                   actor_num_blocks=3,
                                    actor_weight_decay=None,
                                    actor_tau=0.001,
-                                   actor_architecture="ln_resnet", #'ln_resnet',
-                                #    actor_architecture="Q_former", #'ln_resnet',
+                                #    actor_architecture="ln_resnet", #'ln_resnet',
+                                   actor_architecture="Q_former", #'ln_resnet',
+                                   q_former_actor_head="ln_resnet", # 'unet', 'ln_resnet', 'mlp'
+                                   critic_q_former_pooled_dim=32,
+                                   critic_q_former_num_layers=2,
+                                   critic_q_former_num_heads=4,
+                                   critic_q_former_ff_dim=256,
                                    critic_objective='expectile',
                                    beta_schedule='vp',
                                    actor_objective='soft_adv',
-                                   decay_steps=int(2e6), #Change this to int(4e6) for (2) (because you are finetuning actor)
+                                   decay_steps=int(4e6), #Change this to int(4e6) for (2) (because you are finetuning actor)
                                    actor_layer_norm=True,
                                ))
 

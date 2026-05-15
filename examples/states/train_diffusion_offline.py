@@ -26,7 +26,16 @@ def merge_batch(batch1, batch2):
     return frozen_dict.freeze(merge)
 
 
+def uses_q_former_architecture(architecture):
+    """Return whether an architecture string needs token-shaped observations."""
+    if not isinstance(architecture, str):
+        return False
+    architecture = architecture.strip()
+    return architecture == 'Q_former' or architecture.startswith('Q_former+')
+
+
 def call_main(details):
+    details['seed'] = 42
     wandb.init(project=details['project'], name=details['group'])
     wandb.config.update(details)
     print(wandb.run.settings.mode)
@@ -75,7 +84,7 @@ def call_main(details):
                 ds.normalize_returns()
         else:
             uses_q_former_obs = any(
-                config_dict.get(key) == 'Q_former'
+                uses_q_former_architecture(config_dict.get(key))
                 for key in ('actor_architecture', 'critic_architecture', 'value_architecture')
             )
             observation_shape = ds.get_obs_shape() if uses_q_former_obs else (ds.get_obs_dim(),)

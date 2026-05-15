@@ -3,7 +3,8 @@ from typing import Callable, Optional, Sequence
 import flax.linen as nn
 import jax.numpy as jnp
 
-from jaxrl5.networks.mlp import default_init
+from jaxrl5.networks.mlp import MLP, default_init
+from jaxrl5.networks.resnet import MLPResNet
 
 
 def mish(x: jnp.ndarray) -> jnp.ndarray:
@@ -428,6 +429,106 @@ class QFormerUNetBase(nn.Module):
             use_film_scale_modulation=self.use_film_scale_modulation,
             name="policy_head",
         )(actions, time_cond, global_cond)
+
+
+class QFormerMLPBase(nn.Module):
+    """Base model: Q-former global condition followed by an MLP head."""
+
+    action_dim: int
+    hidden_dims: Sequence[int] = (512, 512, 512)
+    token_dim: int = 384
+    pooled_dim: int = 64
+    num_objects: int = 1
+    num_containers: int = 1
+    fusion_num_layers: int = 4
+    fusion_num_heads: int = 8
+    fusion_ff_dim: int = 512
+    fusion_dropout: float = 0.1
+    fusion_mask_type: str = "none"
+    use_layer_norm: bool = False
+    dropout_rate: Optional[float] = None
+
+    @nn.compact
+    def __call__(
+        self,
+        observations: jnp.ndarray,
+        actions: jnp.ndarray,
+        time_cond: jnp.ndarray,
+        training: bool = False,
+    ) -> jnp.ndarray:
+        """Predict DDPM noise with a Q-former encoder and MLP policy head."""
+        global_cond = QFormerEncoder(
+            token_dim=self.token_dim,
+            pooled_dim=self.pooled_dim,
+            num_objects=self.num_objects,
+            num_containers=self.num_containers,
+            num_layers=self.fusion_num_layers,
+            num_heads=self.fusion_num_heads,
+            ff_dim=self.fusion_ff_dim,
+            dropout_rate=self.fusion_dropout,
+            mask_type=self.fusion_mask_type,
+            name="q_former",
+        )(observations, training=training)
+        inputs = jnp.concatenate([actions, global_cond, time_cond], axis=-1)
+        return MLP(
+            hidden_dims=tuple(list(self.hidden_dims) + [self.action_dim]),
+            activations=mish,
+            activate_final=False,
+            use_layer_norm=self.use_layer_norm,
+            dropout_rate=self.dropout_rate,
+            name="policy_head",
+        )(inputs, training=training)
+
+
+class QFormerMLPResNetBase(nn.Module):
+    """Base model: Q-former global condition followed by an MLPResNet head."""
+
+    action_dim: int
+    num_blocks: int = 2
+    hidden_dim: int = 512
+    token_dim: int = 384
+    pooled_dim: int = 64
+    num_objects: int = 1
+    num_containers: int = 1
+    fusion_num_layers: int = 4
+    fusion_num_heads: int = 8
+    fusion_ff_dim: int = 512
+    fusion_dropout: float = 0.1
+    fusion_mask_type: str = "none"
+    use_layer_norm: bool = False
+    dropout_rate: Optional[float] = None
+
+    @nn.compact
+    def __call__(
+        self,
+        observations: jnp.ndarray,
+        actions: jnp.ndarray,
+        time_cond: jnp.ndarray,
+        training: bool = False,
+    ) -> jnp.ndarray:
+        """Predict DDPM noise with a Q-former encoder and MLPResNet policy head."""
+        global_cond = QFormerEncoder(
+            token_dim=self.token_dim,
+            pooled_dim=self.pooled_dim,
+            num_objects=self.num_objects,
+            num_containers=self.num_containers,
+            num_layers=self.fusion_num_layers,
+            num_heads=self.fusion_num_heads,
+            ff_dim=self.fusion_ff_dim,
+            dropout_rate=self.fusion_dropout,
+            mask_type=self.fusion_mask_type,
+            name="q_former",
+        )(observations, training=training)
+        inputs = jnp.concatenate([actions, global_cond, time_cond], axis=-1)
+        return MLPResNet(
+            num_blocks=self.num_blocks,
+            out_dim=self.action_dim,
+            dropout_rate=self.dropout_rate,
+            use_layer_norm=self.use_layer_norm,
+            hidden_dim=self.hidden_dim,
+            activations=mish,
+            name="policy_head",
+        )(inputs, training=training)
 
 
 class QFormerDDPM(nn.Module):

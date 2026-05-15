@@ -11,7 +11,25 @@ from flax import struct
 import numpy as np
 from jaxrl5.agents.agent import Agent
 from jaxrl5.data.dataset import DatasetDict
-from jaxrl5.networks import MLP, Ensemble, StateActionValue, StateValue, DDPM, FourierFeatures, cosine_beta_schedule, ddpm_sampler, MLPResNet, get_weight_decay_mask, vp_beta_schedule, QFormerDDPM, QFormerStateActionValue, QFormerStateValue, QFormerUNetBase
+from jaxrl5.networks import (
+    DDPM,
+    MLP,
+    MLPResNet,
+    Ensemble,
+    FourierFeatures,
+    QFormerDDPM,
+    QFormerMLPBase,
+    QFormerMLPResNetBase,
+    QFormerStateActionValue,
+    QFormerStateValue,
+    QFormerUNetBase,
+    StateActionValue,
+    StateValue,
+    cosine_beta_schedule,
+    ddpm_sampler,
+    get_weight_decay_mask,
+    vp_beta_schedule,
+)
 
 def expectile_loss(diff, expectile=0.8):
     weight = jnp.where(diff > 0, expectile, (1 - expectile))
@@ -49,6 +67,37 @@ def compute_v(value_fn, value_params, observations):
 
 def mish(x):
     return x * jnp.tanh(nn.softplus(x))
+
+def normalize_q_former_actor_architecture(
+    actor_architecture: str,
+    q_former_actor_head: str,
+) -> Tuple[str, str]:
+    """Normalize Q_former actor architecture strings and head names."""
+    actor_architecture = actor_architecture.strip()
+    q_former_actor_head = q_former_actor_head.strip()
+    if not actor_architecture.startswith('Q_former'):
+        return actor_architecture, q_former_actor_head
+
+    parts = [part.strip() for part in actor_architecture.split('+')]
+    if len(parts) > 2 or parts[0] != 'Q_former':
+        raise ValueError(f'Invalid Q_former actor architecture: {actor_architecture}')
+
+    if len(parts) == 2:
+        compound_head = parts[1]
+        if q_former_actor_head != 'unet' and q_former_actor_head != compound_head:
+            raise ValueError(
+                'actor_architecture and q_former_actor_head specify different '
+                f'Q_former heads: {compound_head} vs {q_former_actor_head}'
+            )
+        q_former_actor_head = compound_head
+
+    valid_heads = ('unet', 'ln_resnet', 'mlp')
+    if q_former_actor_head not in valid_heads:
+        raise ValueError(
+            f'Invalid q_former_actor_head: {q_former_actor_head}. '
+            f'Expected one of {valid_heads}.'
+        )
+    return 'Q_former', q_former_actor_head
 
 class DDPMIQLLearner(Agent):
     score_model: TrainState
@@ -107,6 +156,7 @@ class DDPMIQLLearner(Agent):
         critic_objective: str = 'expectile',
         beta_schedule: str = 'vp',
         decay_steps: Optional[int] = int(2e6),
+        q_former_actor_head: str = 'unet',
         q_former_pooled_dim: int = 64,
         q_former_num_layers: int = 4,
         q_former_num_heads: int = 8,
@@ -118,6 +168,11 @@ class DDPMIQLLearner(Agent):
         q_former_n_groups: int = 8,
         q_former_num_objects: int = 1,
         q_former_num_containers: int = 1,
+        critic_q_former_pooled_dim: int = 32,
+        critic_q_former_num_layers: int = 2,
+        critic_q_former_num_heads: int = 4,
+        critic_q_former_ff_dim: int = 256,
+        critic_q_former_dropout: float = 0.1,
     ):
 
         rng = jax.random.PRNGKey(seed)
@@ -125,6 +180,10 @@ class DDPMIQLLearner(Agent):
         actions = action_space.sample()
         observations = observation_space.sample()
         action_dim = action_space.shape[0]
+        actor_architecture, q_former_actor_head = normalize_q_former_actor_architecture(
+            actor_architecture,
+            q_former_actor_head,
+        )
         actor_uses_q_former = actor_architecture == 'Q_former'
         if critic_architecture is None:
             critic_architecture = 'Q_former' if actor_uses_q_former else 'mlp'
@@ -167,20 +226,40 @@ class DDPMIQLLearner(Agent):
                              cond_encoder_cls=cond_model_cls,
                              reverse_encoder_cls=base_model_cls)
         elif actor_architecture == 'Q_former':
-            base_model_cls = partial(QFormerUNetBase,
-                                     action_dim=action_dim,
-                                     token_dim=observations.shape[-1],
-                                     pooled_dim=q_former_pooled_dim,
-                                     num_objects=q_former_num_objects,
-                                     num_containers=q_former_num_containers,
-                                     fusion_num_layers=q_former_num_layers,
-                                     fusion_num_heads=q_former_num_heads,
-                                     fusion_ff_dim=q_former_ff_dim,
-                                     fusion_dropout=q_former_dropout,
-                                     fusion_mask_type=q_former_mask_type,
-                                     down_dims=q_former_down_dims,
-                                     kernel_size=q_former_kernel_size,
-                                     n_groups=q_former_n_groups)
+            q_former_actor_kwargs = dict(
+                action_dim=action_dim,
+                token_dim=observations.shape[-1],
+                pooled_dim=q_former_pooled_dim,
+                num_objects=q_former_num_objects,
+                num_containers=q_former_num_containers,
+                fusion_num_layers=q_former_num_layers,
+                fusion_num_heads=q_former_num_heads,
+                fusion_ff_dim=q_former_ff_dim,
+                fusion_dropout=q_former_dropout,
+                fusion_mask_type=q_former_mask_type,
+            )
+            if q_former_actor_head == 'unet':
+                base_model_cls = partial(QFormerUNetBase,
+                                         **q_former_actor_kwargs,
+                                         down_dims=q_former_down_dims,
+                                         kernel_size=q_former_kernel_size,
+                                         n_groups=q_former_n_groups)
+            elif q_former_actor_head == 'ln_resnet':
+                base_model_cls = partial(QFormerMLPResNetBase,
+                                         **q_former_actor_kwargs,
+                                         num_blocks=actor_num_blocks,
+                                         hidden_dim=actor_hidden_dims[0]
+                                         if len(actor_hidden_dims) > 0 else 512,
+                                         dropout_rate=actor_dropout_rate,
+                                         use_layer_norm=actor_layer_norm)
+            elif q_former_actor_head == 'mlp':
+                base_model_cls = partial(QFormerMLPBase,
+                                         **q_former_actor_kwargs,
+                                         hidden_dims=actor_hidden_dims,
+                                         dropout_rate=actor_dropout_rate,
+                                         use_layer_norm=actor_layer_norm)
+            else:
+                raise ValueError(f'Invalid q_former_actor_head: {q_former_actor_head}')
             actor_def = QFormerDDPM(time_preprocess_cls=preprocess_time_cls,
                                     cond_encoder_cls=cond_model_cls,
                                     reverse_encoder_cls=base_model_cls)
@@ -212,13 +291,13 @@ class DDPMIQLLearner(Agent):
             critic_cls = partial(QFormerStateActionValue,
                                  base_cls=critic_base_cls,
                                  token_dim=observations.shape[-1],
-                                 pooled_dim=q_former_pooled_dim,
+                                 pooled_dim=critic_q_former_pooled_dim,
                                  num_objects=q_former_num_objects,
                                  num_containers=q_former_num_containers,
-                                 fusion_num_layers=q_former_num_layers,
-                                 fusion_num_heads=q_former_num_heads,
-                                 fusion_ff_dim=q_former_ff_dim,
-                                 fusion_dropout=q_former_dropout,
+                                 fusion_num_layers=critic_q_former_num_layers,
+                                 fusion_num_heads=critic_q_former_num_heads,
+                                 fusion_ff_dim=critic_q_former_ff_dim,
+                                 fusion_dropout=critic_q_former_dropout,
                                  fusion_mask_type=q_former_mask_type)
         else:
             raise ValueError(f'Invalid critic architecture: {critic_architecture}')
@@ -227,6 +306,11 @@ class DDPMIQLLearner(Agent):
         critic_param_count = count_params(critic_params)
         print(f"[Model Size] Critic Q params: {critic_param_count:,}")
         critic_optimiser = optax.adam(learning_rate=critic_lr)
+        # critic_optimiser = optax.chain(
+        #     optax.clip_by_global_norm(1.0),
+        #     optax.adam(learning_rate=critic_lr),
+        # )
+
         critic = TrainState.create(
             apply_fn=critic_def.apply, params=critic_params, tx=critic_optimiser
         )
@@ -253,6 +337,10 @@ class DDPMIQLLearner(Agent):
             raise ValueError(f'Invalid value architecture: {value_architecture}')
         value_params = value_def.init(value_key, observations)["params"]
         value_optimiser = optax.adam(learning_rate=value_lr)
+        # value_optimiser = optax.chain(
+        #     optax.clip_by_global_norm(1.0),
+        #     optax.adam(learning_rate=value_lr),
+        # )
 
         value = TrainState.create(apply_fn=value_def.apply,
                                   params=value_params,
@@ -429,7 +517,7 @@ class DDPMIQLLearner(Agent):
     def eval_actions(self, observations: jnp.ndarray):
         rng = self.rng
 
-        assert len(observations.shape) == 1
+        # assert len(observations.shape) == 1
         observations = jax.device_put(observations)
         observations = jnp.expand_dims(observations, axis = 0).repeat(self.N, axis = 0)
 
